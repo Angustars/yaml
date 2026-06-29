@@ -1344,40 +1344,40 @@ kubectl create secret docker-registry harbor-secret \
 
 ## 九、普罗米修斯
 
-1、下载git
+### 1、下载git
 
 ```shell
 dnf install -y git
 ```
 
-2、拉取git仓库
+### 2、拉取git仓库
 
 ```shell
 git clone https://github.com/coreos/kube-prometheus.git
 ```
 
-3、切换分支-根据实际情况切换-[GitHub - prometheus-operator/kube-prometheus: Use Prometheus to monitor Kubernetes and applications running on Kubernetes · GitHub](https://github.com/prometheus-operator/kube-prometheus)
+### 3、切换分支-根据实际情况切换-[GitHub - prometheus-operator/kube-prometheus: Use Prometheus to monitor Kubernetes and applications running on Kubernetes · GitHub](https://github.com/prometheus-operator/kube-prometheus)
 
 ```shell
 git checkout main
 ```
 
-4、修改镜像
+### 4、修改镜像
 
 ![](file://D:\user\zm\AI学习资料\三主六从k8s搭建\2026-06-23-10-38-31-image.png?msec=1782698295088)
 
-5、cat /var/lib/kubelet/config.yaml 确认环境正常
+### 5、cat /var/lib/kubelet/config.yaml 确认环境正常
 
-6、部署 CRD + monitoring 命名空间
+### 6、部署 CRD + monitoring 命名空间
 
 ```shell
 kubectl apply --server-side -f manifests/setup
 ```
 
-7、部署全套监控组件
+### 7、部署全套监控组件
 
 ```shell
 kubectl apply -f manifests/
 ```
 
-8、等待全部pod启动，创建Grafana的ingress
+### 8、等待全部pod启动，创建Grafana的ingress
