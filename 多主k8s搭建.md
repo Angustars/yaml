@@ -1361,7 +1361,7 @@ git clone https://github.com/coreos/kube-prometheus.git
 git checkout main
 ```
 
-### 4、修改镜像
+### 4、修改镜像修改grafana-networkPolicy.yaml，prometheus-networkPolicy.yaml入站为空，改grafana-deployment.yaml资源限制
 
 <img width="1680" height="33" alt="2026-06-23-10-38-31-image" src="https://github.com/user-attachments/assets/90cd1bc9-b759-4f91-8d92-f703fb083bb8" />
 
@@ -1381,3 +1381,40 @@ kubectl apply -f manifests/
 ```
 
 ### 8、等待全部pod启动，创建Grafana的ingress
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: prometheus-ingress
+  namespace: monitoring
+  annotations:
+    # 大图表查询放大请求体
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    # 长查询超时
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "300"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: k8s.prometheus.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: prometheus-k8s
+                port:
+                  name: web
+    - host: k8s.grafana.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: grafana
+                port:
+                  name: http
+```
