@@ -1,0 +1,352 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mysql-cluster
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-secret
+  namespace: mysql-cluster
+type: Opaque
+data:
+  root-password: "Um9vdEAxMjM0NTY="   # Root@123456
+  repl-password: "UmVwbEAxMjM0NTY="    # Rep@123456
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-config
+  namespace: mysql-cluster
+data:
+  my.cnf: |
+    [mysqld]
+    default-storage-engine=innodb
+    character-set-server=utf8mb4
+    collation-server=utf8mb4_unicode_ci
+    log-bin=mysql-bin
+    gtid_mode=ON
+    enforce_gtid_consistency=ON
+    server-id=1
+    relay-log=relay-bin
+    read_only=ON
+    innodb_buffer_pool_size = 1G
+    max_connections = 2000
+    wait_timeout = 600
+    interactive_timeout = 600
+    innodb_log_buffer_size = 64M
+    sort_buffer_size = 2M
+    join_buffer_size = 2M
+    binlog_expire_logs_seconds = 604800
+    innodb_redo_log_capacity = 536870912
+  auto-init.sh: |
+    #!/bin/bash
+    set -e
+    MARK_FILE=/var/lib/mysql/.init-done
+    if [ -f $MARK_FILE ]; then
+      echo "✅ Already initialized, skip auto-init"
+      exit 0
+    fi
+    echo "⏳ Waiting MySQL TCP 3306 ready..."
+    for i in {1..180}; do
+      if mysql -uroot -p${MYSQL_ROOT_PASSWORD} -h 127.0.0.1 -P 3306 -e "SELECT 1"; then
+        break
+      fi
+      sleep 3
+    done
+
+    if [[ $HOSTNAME == mysql-0 ]]; then
+      echo "🔧 Master init: create repl user with mysql_native_password"
+      mysql -uroot -p${MYSQL_ROOT_PASSWORD} -h 127.0.0.1 -P 3306 -e "
+        CREATE USER IF NOT EXISTS 'repl'@'%' IDENTIFIED WITH mysql_native_password BY '${MYSQL_REPL_PASSWORD}';
+        GRANT REPLICATION SLAVE ON *.* TO 'repl'@'%';
+        FLUSH PRIVILEGES;
+      "
+    else
+      echo "🔧 Slave init: start replication"
+      MASTER_HOST="mysql-0.mysql.mysql-cluster.svc.cluster.local"
+      for i in {1..180}; do
+        if mysql -uroot -p${MYSQL_ROOT_PASSWORD} -h $MASTER_HOST -P 3306 -e "SELECT 1"; then
+          break
+        fi
+        sleep 3
+      done
+      mysql -uroot -p${MYSQL_ROOT_PASSWORD} -h 127.0.0.1 -P 3306 -e "
+        STOP SLAVE;
+        RESET SLAVE ALL;
+        CHANGE MASTER TO
+        MASTER_HOST='${MASTER_HOST}',
+        MASTER_USER='repl',
+        MASTER_PASSWORD='${MYSQL_REPL_PASSWORD}',
+        MASTER_AUTO_POSITION=1,
+        MASTER_SSL=0;
+        START SLAVE;
+      "
+    fi
+    touch $MARK_FILE
+    echo "✅ Auto init finished, mark created"
+  template.cnf: |
+    [client]
+    user=root
+    password={{MYSQL_ROOT_PASSWORD}}
+    host=mysql.mysql-cluster.svc.cluster.local
+    port=3306
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: mysql-cluster
+  labels:
+    app: mysql
+spec:
+  selector:
+    app: mysql
+  ports:
+  - port: 3306
+    name: mysql
+  clusterIP: None
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-master-nodeport
+  namespace: mysql-cluster
+spec:
+  selector:
+    statefulset.kubernetes.io/pod-name: mysql-0
+  type: NodePort
+  ports:
+  - port: 3306
+    targetPort: 3306
+    nodePort: 30306
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: mysql-cluster
+spec:
+  serviceName: mysql
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      volumes:
+      - name: config
+        configMap:
+          name: mysql-config
+      - name: writable-conf
+        emptyDir: {}
+      initContainers:
+      - name: init-mysql-serverid
+        image: crpi-g51umcgptt33wt4r.cn-hangzhou.personal.cr.aliyuncs.com/angustar/mysql:8.0
+        command:
+        - bash
+        - -c
+        - |
+          set -ex
+          cp /readonly/my.cnf /writable/my.cnf
+          [[ $HOSTNAME =~ mysql-([0-9]+) ]]
+          SID=$(( ${BASH_REMATCH[1]} + 100 ))
+          sed -i "s/^server-id=.*/server-id=$SID/" /writable/my.cnf
+          cat /writable/my.cnf
+        volumeMounts:
+        - name: config
+          mountPath: /readonly
+        - name: writable-conf
+          mountPath: /writable
+      containers:
+      - name: mysql
+        image: crpi-g51umcgptt33wt4r.cn-hangzhou.personal.cr.aliyuncs.com/angustar/mysql:8.0
+        env:
+        - name: TZ
+          value: Asia/Shanghai
+        - name: MYSQL_ROOT_HOST
+          value: '%'
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: root-password
+        - name: MYSQL_REPL_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: repl-password
+        ports:
+        - containerPort: 3306
+          name: mysql
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+          limits:
+            cpu: 1000m
+            memory: 1.5Gi
+        lifecycle:
+          postStart:
+            exec:
+              command:
+              - /bin/bash
+              - -c
+              - |
+                sleep 20
+                nohup /bin/bash /etc/mysql-scripts/auto-init.sh > /var/lib/mysql/auto-init.log 2>&1 &
+        readinessProbe:
+          tcpSocket:
+            port: 3306
+          initialDelaySeconds: 180
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: 3306
+          initialDelaySeconds: 180
+          periodSeconds: 10
+          failureThreshold: 3
+        volumeMounts:
+        - name: writable-conf
+          mountPath: /etc/mysql/my.cnf
+          subPath: my.cnf
+        - name: config
+          mountPath: /etc/mysql-scripts
+        - name: mysql-data
+          mountPath: /var/lib/mysql
+  volumeClaimTemplates:
+  - metadata:
+      name: mysql-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: "managed-nfs-storage"
+      resources:
+        requests:
+          storage: 10Gi
+---
+# mysqld-exporter 修正挂载
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysqld-exporter
+  namespace: mysql-cluster
+  labels:
+    app: mysqld-exporter
+    mysql-instance: mysql
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysqld-exporter
+  template:
+    metadata:
+      labels:
+        app: mysqld-exporter
+        mysql-instance: mysql
+    spec:
+      imagePullSecrets:
+      - name: ali-harbor
+      volumes:
+      - name: template-volume
+        configMap:
+          name: mysql-config
+      - name: runtime-conf
+        emptyDir: {}
+      initContainers:
+      - name: init-gen-cnf
+        image: crpi-g51umcgptt33wt4r.cn-hangzhou.personal.cr.aliyuncs.com/angustar/busybox:1.36.0
+        command:
+        - sh
+        - -c
+        - |
+          cp /template/template.cnf /runtime/.my.cnf
+          sed -i "s|{{MYSQL_ROOT_PASSWORD}}|${MYSQL_ROOT_PASSWORD}|g" /runtime/.my.cnf
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: root-password
+        volumeMounts:
+        - name: template-volume
+          mountPath: /template
+        - name: runtime-conf
+          mountPath: /runtime
+      containers:
+      - name: mysqld-exporter
+        image: crpi-g51umcgptt33wt4r.cn-hangzhou.personal.cr.aliyuncs.com/angustar/mysqld-exporter:20260703
+        ports:
+        - containerPort: 9104
+          name: metrics
+        volumeMounts:
+        - name: runtime-conf
+          mountPath: /etc/mysql/.my.cnf
+          subPath: .my.cnf
+        args:
+          - --config.my-cnf=/etc/mysql/.my.cnf
+          - --collect.info_schema.tables
+          - --collect.info_schema.innodb_metrics
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        livenessProbe:
+          httpGet:
+            path: /metrics
+            port: metrics
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /metrics
+            port: metrics
+          initialDelaySeconds: 3
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysqld-exporter
+  namespace: mysql-cluster
+  labels:
+    app: mysqld-exporter
+    mysql-instance: mysql
+spec:
+  ports:
+  - port: 9104
+    targetPort: metrics
+    protocol: TCP
+    name: metrics
+  selector:
+    app: mysqld-exporter
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    app.kubernetes.io/component: prometheus
+    app.kubernetes.io/instance: k8s
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: kube-prometheus
+    app.kubernetes.io/version: 3.12.0
+  name: mysql-cluster
+  namespace: monitoring
+spec:
+  endpoints:
+  - interval: 15s
+    scrapeTimeout: 10s
+    port: metrics
+    scheme: http
+  selector:
+    matchLabels:
+      app: mysqld-exporter
+  namespaceSelector:
+    matchNames:
+    - mysql-cluster
