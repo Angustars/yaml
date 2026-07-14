@@ -1,0 +1,280 @@
+# ===================== 命名空间 =====================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: redis-cluster
+---
+# ===================== Redis 密码 Secret =====================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: redis-secret
+  namespace: redis-cluster
+type: Opaque
+data:
+  # 默认密码 Redis@123456
+  redis-password: UmVkaXNAMTIzNDU2
+---
+# ===================== Redis 配置与集群初始化脚本 =====================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: redis-cluster
+data:
+  redis.conf: |
+    bind 0.0.0.0
+    port 6379
+    daemonize no
+    protected-mode yes
+    appendonly yes
+    aof-use-rdb-preamble yes
+    dir /data
+    loglevel notice
+    slowlog-log-slower-than 10000
+    slowlog-max-len 128
+    # 集群核心配置
+    cluster-enabled yes
+    cluster-config-file nodes.conf
+    cluster-node-timeout 15000
+    cluster-require-full-coverage no
+    cluster-migration-barrier 1
+  init-cluster.sh: |
+    #!/bin/sh
+    set -e
+    # ========== 集群规模参数 ==========
+    # 主节点数量
+    MASTER_COUNT=3
+    # 每个主节点的从节点数量
+    SLAVE_PER_MASTER=1
+    # 总节点数
+    TOTAL_NODES=$(( MASTER_COUNT * (1 + SLAVE_PER_MASTER) ))
+    REDIS_SERVICE="redis.redis-cluster.svc.cluster.local"
+    AUTH="-a ${REDIS_PASSWORD} --no-auth-warning"
+
+    POD_ORDINAL=$(hostname | awk -F'-' '{print $NF}')
+    # 仅 0 号节点执行集群初始化
+    if [ "$POD_ORDINAL" != "0" ]; then
+      exit 0
+    fi
+
+    # 已初始化则跳过
+    if [ -f /data/cluster-init-done ]; then
+      echo "集群已初始化，跳过"
+      exit 0
+    fi
+
+    echo "等待所有 ${TOTAL_NODES} 个节点就绪..."
+    # 等待所有节点可连接
+    for i in $(seq 0 $(( TOTAL_NODES - 1 ))); do
+      NODE_HOST="redis-${i}.${REDIS_SERVICE}"
+      for try in $(seq 1 60); do
+        if redis-cli -h "${NODE_HOST}" -p 6379 ${AUTH} ping 2>/dev/null | grep -q PONG; then
+          echo "节点 redis-${i} 就绪"
+          break
+        fi
+        sleep 2
+      done
+    done
+
+    # 构造所有节点地址列表
+    NODE_LIST=""
+    for i in $(seq 0 $(( TOTAL_NODES - 1 ))); do
+      NODE_LIST="${NODE_LIST} redis-${i}.${REDIS_SERVICE}:6379"
+    done
+
+    echo "开始创建 Redis Cluster 集群..."
+    echo "节点列表: ${NODE_LIST}"
+
+    # 使用官方集群创建命令，自动分配槽位、配对主从
+    redis-cli --cluster create ${NODE_LIST} \
+      --cluster-replicas ${SLAVE_PER_MASTER} \
+      --cluster-yes \
+      ${AUTH}
+
+    echo "等待集群状态变为 ok..."
+    for try in $(seq 1 30); do
+      STATE=$(redis-cli -h redis-0.${REDIS_SERVICE} -p 6379 ${AUTH} cluster info | grep cluster_state | cut -d: -f2 | tr -d '\r')
+      if [ "$STATE" = "ok" ]; then
+        echo "集群状态正常"
+        break
+      fi
+      sleep 2
+    done
+
+    # 标记初始化完成
+    touch /data/cluster-init-done
+    echo "Redis Cluster 集群初始化完成"
+    exit 0
+---
+# ===================== Redis Headless Service =====================
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: redis-cluster
+  labels:
+    app: redis
+    app.kubernetes.io/component: redis-cluster
+    metrics: "true"
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+      protocol: TCP
+    - name: cluster-bus
+      port: 16379
+      targetPort: 16379
+      protocol: TCP
+    - name: metrics
+      port: 9121
+      targetPort: 9121
+      protocol: TCP
+---
+# ===================== Redis Cluster StatefulSet =====================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: redis-cluster
+spec:
+  serviceName: redis
+  # 总节点数 = 主节点数 * (1 + 从节点数)
+  replicas: 6
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      initContainers:
+        - name: init-permission
+          image: crpi-g51umcgptt33wt4r.cn-hangzhou.personal.cr.aliyuncs.com/angustar/busybox:1.36.0
+          command: ["sh", "-c", "chown -R 999:999 /data"]
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+      containers:
+        # Redis 主容器
+        - name: redis
+          image: crpi-g51umcgptt33wt4r.cn-hangzhou.personal.cr.aliyuncs.com/angustar/redis:8.8.0
+          command:
+            - sh
+            - -c
+            - |
+              # 复制配置到可写的数据目录（集群会自动更新nodes.conf）
+              cp /etc/redis/redis.conf /data/redis.conf
+              redis-server /data/redis.conf \
+                --requirepass ${REDIS_PASSWORD} \
+                --masterauth ${REDIS_PASSWORD} &
+              sleep 5
+              sh /etc/redis/init-cluster.sh
+              wait
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-secret
+                  key: redis-password
+          ports:
+            - containerPort: 6379
+              name: redis
+            - containerPort: 16379
+              name: cluster-bus
+          volumeMounts:
+            - name: redis-config
+              mountPath: /etc/redis
+            - name: redis-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "redis-cli -a ${REDIS_PASSWORD} --no-auth-warning ping"]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "redis-cli -a ${REDIS_PASSWORD} --no-auth-warning ping"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+
+        # 监控 Exporter Sidecar
+        - name: redis-exporter
+          image: crpi-g51umcgptt33wt4r.cn-hangzhou.personal.cr.aliyuncs.com/angustar/redis-exporter:20260706
+          env:
+            - name: REDIS_ADDR
+              value: "redis://127.0.0.1:6379"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-secret
+                  key: redis-password
+            - name: REDIS_EXPORTER_CHECK_KEYS_DB
+              value: "false"
+          ports:
+            - containerPort: 9121
+              name: metrics
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 9121
+            initialDelaySeconds: 15
+            periodSeconds: 15
+      volumes:
+        - name: redis-config
+          configMap:
+            name: redis-config
+            defaultMode: 0755
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+# ===================== Prometheus ServiceMonitor =====================
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: redis-cluster-metrics
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/component: prometheus
+    app.kubernetes.io/instance: k8s
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: kube-prometheus
+    app.kubernetes.io/version: 3.12.0
+spec:
+  namespaceSelector:
+    matchNames:
+      - redis-cluster
+  selector:
+    matchLabels:
+      app: redis
+      metrics: "true"
+  endpoints:
+    - port: metrics
+      interval: 15s
+      scrapeTimeout: 10s
