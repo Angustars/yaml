@@ -1,0 +1,402 @@
+# ===================== 命名空间 =====================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: redis-sentinel
+---
+# ===================== Redis 密码 Secret =====================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: redis-secret
+  namespace: redis-sentinel
+type: Opaque
+data:
+  # 默认密码 Redis@123456，修改执行：echo -n "你的密码" | base64
+  redis-password: UmVkaXNAMTIzNDU2
+---
+# ===================== Redis 配置文件 =====================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: redis-sentinel
+data:
+  redis.conf: |
+    bind 0.0.0.0
+    port 6379
+    daemonize no
+    protected-mode yes
+    appendonly yes
+    aof-use-rdb-preamble yes
+    dir /data
+    loglevel notice
+    slowlog-log-slower-than 10000
+    slowlog-max-len 128
+  init-redis.sh: |
+    #!/bin/sh
+    set -e
+    POD_ORDINAL=$(hostname | awk -F'-' '{print $NF}')
+    REDIS_SERVICE="redis.redis-sentinel.svc.cluster.local"
+    MASTER_POD="redis-0.${REDIS_SERVICE}"
+    AUTH="-a ${REDIS_PASSWORD} --no-auth-warning"
+
+    echo "当前 Pod 序号: ${POD_ORDINAL}"
+    if [ "$POD_ORDINAL" = "0" ]; then
+      echo "当前为初始主节点，跳过 SLAVEOF"
+      exit 0
+    fi
+
+    echo "等待主节点 ${MASTER_POD} 就绪..."
+    for i in $(seq 1 30); do
+      if redis-cli -h "${MASTER_POD}" -p 6379 ${AUTH} ping 2>/dev/null | grep -q PONG; then
+        echo "主节点就绪，执行 SLAVEOF 加入集群"
+        redis-cli -h 127.0.0.1 -p 6379 ${AUTH} SLAVEOF "${MASTER_POD}" 6379
+        exit 0
+      fi
+      sleep 2
+    done
+    echo "警告：主节点超时，以独立模式启动"
+    exit 0
+---
+# ===================== Sentinel 配置模板 =====================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sentinel-config
+  namespace: redis-sentinel
+data:
+  sentinel.conf: |
+    port 26379
+    daemonize no
+    protected-mode no
+    dir /sentinel-workdir
+    sentinel monitor mymaster redis-0.redis.redis-sentinel.svc.cluster.local 6379 2
+    sentinel auth-pass mymaster {{REDIS_PASSWORD}}
+    sentinel down-after-milliseconds mymaster 5000
+    sentinel failover-timeout mymaster 15000
+    sentinel parallel-syncs mymaster 1
+    sentinel resolve-hostnames yes
+    sentinel announce-hostnames yes
+---
+# ===================== Redis Headless Service（业务+监控二合一） =====================
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: redis-sentinel
+  labels:
+    app: redis
+    app.kubernetes.io/component: redis-server
+    metrics: "true"
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+      protocol: TCP
+    - name: metrics
+      port: 9121
+      targetPort: 9121
+      protocol: TCP
+---
+# ===================== Sentinel Service（业务+监控二合一） =====================
+apiVersion: v1
+kind: Service
+metadata:
+  name: sentinel
+  namespace: redis-sentinel
+  labels:
+    app: sentinel
+    app.kubernetes.io/component: redis-sentinel
+    metrics: "true"
+spec:
+  type: ClusterIP
+  selector:
+    app: sentinel
+  ports:
+    - name: sentinel
+      port: 26379
+      targetPort: 26379
+      protocol: TCP
+    - name: metrics
+      port: 9121
+      targetPort: 9121
+      protocol: TCP
+---
+# ===================== Redis StatefulSet（密码+监控Sidecar） =====================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: redis-sentinel
+spec:
+  serviceName: redis
+  replicas: 3
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      initContainers:
+        - name: init-permission
+          image: crpi-g51umcgptt33wt4r.cn-hangzhou.personal.cr.aliyuncs.com/angustar/busybox:1.36.0
+          command: ["sh", "-c", "chown -R 999:999 /data"]
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+      containers:
+        # Redis 主容器
+        - name: redis
+          image: crpi-g51umcgptt33wt4r.cn-hangzhou.personal.cr.aliyuncs.com/angustar/redis:8.8.0
+          command:
+            - sh
+            - -c
+            - |
+              redis-server /etc/redis/redis.conf \
+                --requirepass ${REDIS_PASSWORD} \
+                --masterauth ${REDIS_PASSWORD} &
+              sleep 3
+              sh /etc/redis/init-redis.sh
+              wait
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-secret
+                  key: redis-password
+          ports:
+            - containerPort: 6379
+              name: redis
+          volumeMounts:
+            - name: redis-config
+              mountPath: /etc/redis
+            - name: redis-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "redis-cli -a ${REDIS_PASSWORD} --no-auth-warning ping"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "redis-cli -a ${REDIS_PASSWORD} --no-auth-warning ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+
+        # Redis 监控 Exporter Sidecar
+        - name: redis-exporter
+          image: crpi-g51umcgptt33wt4r.cn-hangzhou.personal.cr.aliyuncs.com/angustar/redis-exporter:20260706
+          env:
+            - name: REDIS_ADDR
+              value: "redis://127.0.0.1:6379"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-secret
+                  key: redis-password
+          ports:
+            - containerPort: 9121
+              name: metrics
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 9121
+            initialDelaySeconds: 10
+            periodSeconds: 15
+      volumes:
+        - name: redis-config
+          configMap:
+            name: redis-config
+            defaultMode: 0755
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+# ===================== Sentinel StatefulSet（修复只读问题+密码+监控） =====================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sentinel
+  namespace: redis-sentinel
+spec:
+  serviceName: sentinel
+  replicas: 3
+  selector:
+    matchLabels:
+      app: sentinel
+  template:
+    metadata:
+      labels:
+        app: sentinel
+    spec:
+      initContainers:
+        - name: init-sentinel
+          image: crpi-g51umcgptt33wt4r.cn-hangzhou.personal.cr.aliyuncs.com/angustar/redis:8.8.0
+          command:
+            - sh
+            - -c
+            - |
+              # 1. 复制配置到可写工作目录（解决ConfigMap只读问题）
+              cp /etc/sentinel/sentinel.conf /sentinel-workdir/sentinel.conf
+              # 2. 替换密码占位符
+              sed -i "s/{{REDIS_PASSWORD}}/${REDIS_PASSWORD}/g" /sentinel-workdir/sentinel.conf
+              # 3. 等待 Redis 主节点就绪
+              MASTER="redis-0.redis.redis-sentinel.svc.cluster.local"
+              AUTH="-a ${REDIS_PASSWORD} --no-auth-warning"
+              echo "等待 Redis 主节点就绪..."
+              for i in $(seq 1 30); do
+                if redis-cli -h "${MASTER}" -p 6379 ${AUTH} ping 2>/dev/null | grep -q PONG; then
+                  echo "Redis 主节点就绪，启动哨兵"
+                  exit 0
+                fi
+                sleep 2
+              done
+              echo "警告：Redis 主节点超时，哨兵仍将启动"
+              exit 0
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-secret
+                  key: redis-password
+          volumeMounts:
+            - name: sentinel-config
+              mountPath: /etc/sentinel
+            - name: sentinel-workdir
+              mountPath: /sentinel-workdir
+      containers:
+        # Sentinel 主容器
+        - name: sentinel
+          image: crpi-g51umcgptt33wt4r.cn-hangzhou.personal.cr.aliyuncs.com/angustar/redis:8.8.0
+          command: ["redis-sentinel", "/sentinel-workdir/sentinel.conf"]
+          ports:
+            - containerPort: 26379
+              name: sentinel
+          volumeMounts:
+            - name: sentinel-workdir
+              mountPath: /sentinel-workdir
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          livenessProbe:
+            tcpSocket:
+              port: 26379
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 26379
+            initialDelaySeconds: 5
+            periodSeconds: 5
+
+        # 哨兵监控 Exporter Sidecar
+        - name: sentinel-exporter
+          image: crpi-g51umcgptt33wt4r.cn-hangzhou.personal.cr.aliyuncs.com/angustar/redis-exporter:20260706
+          env:
+            - name: REDIS_ADDR
+              value: "redis://127.0.0.1:26379"
+          ports:
+            - containerPort: 9121
+              name: metrics
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 9121
+            initialDelaySeconds: 10
+            periodSeconds: 15
+      volumes:
+        - name: sentinel-config
+          configMap:
+            name: sentinel-config
+            defaultMode: 0755
+        # 可写工作目录：存放运行时配置，支持哨兵自动改写
+        - name: sentinel-workdir
+          emptyDir: {}
+---
+# ===================== Redis 指标 ServiceMonitor =====================
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: redis-metrics
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/component: prometheus
+    app.kubernetes.io/instance: k8s
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: kube-prometheus
+    app.kubernetes.io/version: 3.12.0
+spec:
+  namespaceSelector:
+    matchNames:
+      - redis-sentinel
+  selector:
+    matchLabels:
+      app: redis
+      metrics: "true"
+  endpoints:
+    - port: metrics
+      interval: 15s
+      scrapeTimeout: 10s
+---
+# ===================== 哨兵指标 ServiceMonitor =====================
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: sentinel-metrics
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/component: prometheus
+    app.kubernetes.io/instance: k8s
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: kube-prometheus
+    app.kubernetes.io/version: 3.12.0
+spec:
+  namespaceSelector:
+    matchNames:
+      - redis-sentinel
+  selector:
+    matchLabels:
+      app: sentinel
+      metrics: "true"
+  endpoints:
+    - port: metrics
+      interval: 15s
+      scrapeTimeout: 10s
