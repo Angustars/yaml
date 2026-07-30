@@ -71,14 +71,14 @@ cat .ssh/id_rsa
 ```
 
 3. 添加私钥到凭证
-   
-   ![2026-05-14-20-52-24-1f5a56d2-bed3-4704-b8f5-b93bf0300313.png](D:\user\zm\AI学习资料\CICD项目-阿里云部署-GitLab+Jenkins+Nginx\2026-05-14-20-52-24-1f5a56d2-bed3-4704-b8f5-b93bf0300313.png)
+   <img width="2550" height="1364" alt="2026-05-14-20-52-24-1f5a56d2-bed3-4704-b8f5-b93bf0300313" src="https://github.com/user-attachments/assets/afaa4aef-1efb-4f46-b923-e5a039690984" />
+   <img width="827" height="1251" alt="2026-05-14-20-57-59-c0ba1475-bde6-43f4-87b1-f0231aaac0a7" src="https://github.com/user-attachments/assets/cbbc45a1-cb72-45ec-a232-8b8c4aa41a86" />
 
-![2026-05-14-20-57-59-c0ba1475-bde6-43f4-87b1-f0231aaac0a7.png](D:\user\zm\AI学习资料\CICD项目-阿里云部署-GitLab+Jenkins+Nginx\2026-05-14-20-57-59-c0ba1475-bde6-43f4-87b1-f0231aaac0a7.png)
 
 #### 11、全局安全配置
 
-![2026-05-14-21-00-05-image.png](D:\user\zm\AI学习资料\CICD项目-阿里云部署-GitLab+Jenkins+Nginx\2026-05-14-21-00-05-image.png)
+<img width="2559" height="1389" alt="2026-05-14-21-00-05-image" src="https://github.com/user-attachments/assets/c3a95dcb-2128-4ae3-8722-99bf8d5f26a9" />
+
 
 ### 2）GitLab
 
@@ -120,7 +120,7 @@ cat /etc/gitlab/initial_root_password
 
 #### 7、设置出站规则
 
-![2026-05-14-21-06-50-image.png](D:\user\zm\AI学习资料\CICD项目-阿里云部署-GitLab+Jenkins+Nginx\2026-05-14-21-06-50-image.png)
+<img width="2559" height="1389" alt="2026-05-14-21-06-50-image" src="https://github.com/user-attachments/assets/2df43575-7263-43c6-b1e9-ae406a6d1ea8" />
 
 #### 8、新建项目
 
@@ -139,11 +139,11 @@ ssh-copy-id root@<Nginx服务器地址>
 
 #### 2、新建任务
 
-![2026-05-14-21-09-33-image.png](D:\user\zm\AI学习资料\CICD项目-阿里云部署-GitLab+Jenkins+Nginx\2026-05-14-21-09-33-image.png)
+<img width="2559" height="1398" alt="2026-05-14-21-09-33-image" src="https://github.com/user-attachments/assets/0a73e688-04fa-49a4-868e-e38f628e4deb" />
 
 #### 3、设置源码管理
 
-![2026-05-14-21-13-56-image.png](D:\user\zm\AI学习资料\CICD项目-阿里云部署-GitLab+Jenkins+Nginx\2026-05-14-21-13-56-image.png)
+<img width="1730" height="1182" alt="2026-05-14-21-13-56-image" src="https://github.com/user-attachments/assets/deab8535-2c49-4b58-826c-b93fb97050a0" />
 
 - 新版GitLab分支为mian
 
@@ -158,11 +158,11 @@ chmod 600 /var/lib/jenkins/.ssh/known_hosts
 
 #### 4、Triggers
 
-![2026-05-14-21-24-46-2b702763-bfce-4a3a-95fc-cf075414b7bf.png](D:\user\zm\AI学习资料\CICD项目-阿里云部署-GitLab+Jenkins+Nginx\2026-05-14-21-24-46-2b702763-bfce-4a3a-95fc-cf075414b7bf.png)
+<img width="1260" height="1224" alt="2026-05-14-21-24-46-2b702763-bfce-4a3a-95fc-cf075414b7bf" src="https://github.com/user-attachments/assets/45ae5eec-790c-4968-ad70-52c74cb7543c" />
 
 #### 5、Build Steps
 
-![2026-05-14-21-31-04-image.png](D:\user\zm\AI学习资料\CICD项目-阿里云部署-GitLab+Jenkins+Nginx\2026-05-14-21-31-04-image.png)
+<img width="1695" height="774" alt="2026-05-14-21-31-04-image" src="https://github.com/user-attachments/assets/9a1df4d3-3927-45d1-9421-dae00a1f87d8" />
 
 ```vimag-0-1johvnm5kag-1-1johvnm5kag-0-1johvnm5kag-1-1johvnm5k
 #!/bin/bash
@@ -180,16 +180,15 @@ rsync -av --delete $SOURCE_DIR root@192.168.103.103:$DEST_DIR
 
 #### 1、添加Nginx服务器公钥
 
-![2026-05-14-21-44-20-image.png](D:\user\zm\AI学习资料\CICD项目-阿里云部署-GitLab+Jenkins+Nginx\2026-05-14-21-44-20-image.png)
+<img width="2547" height="1395" alt="2026-05-14-21-44-20-image" src="https://github.com/user-attachments/assets/9194f408-a917-4ac2-9899-81b3911e1725" />
 
 #### 2、添加Jenkins服务器公钥
 
-![2026-05-14-21-48-32-image.png](D:\user\zm\AI学习资料\CICD项目-阿里云部署-GitLab+Jenkins+Nginx\2026-05-14-21-48-32-image.png)
-
-
+<img width="2559" height="1398" alt="2026-05-14-21-48-32-image" src="https://github.com/user-attachments/assets/44e2873c-7d33-4248-bf1b-9c95c4521bd1" />
 
 #### 3、设置webhook
 
-![2026-05-14-21-38-04-image.png](D:\user\zm\AI学习资料\CICD项目-阿里云部署-GitLab+Jenkins+Nginx\2026-05-14-21-38-04-image.png)
+<img width="2559" height="1404" alt="2026-05-14-21-38-04-image" src="https://github.com/user-attachments/assets/6816bb1f-9a21-4c04-9b2c-d37813691393" />
+<img width="2547" height="252" alt="2026-05-14-21-42-36-image" src="https://github.com/user-attachments/assets/ba6be114-fa1b-4662-b0cb-49eb576ca9a1" />
 
-![2026-05-14-21-42-36-image.png](D:\user\zm\AI学习资料\CICD项目-阿里云部署-GitLab+Jenkins+Nginx\2026-05-14-21-42-36-image.png)
+
